@@ -8,3 +8,6 @@ docs/
 .scratch/
 AGENTS.md
 critiques.md
+debug_*
+*.db
+*.db-journal
