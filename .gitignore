@@ -1,7 +1,6 @@
 db/
 db/*.db
 db/*.db-journal
-SPEC.md
 go-guide.md
 decisions.md
 docs/
