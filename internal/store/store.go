@@ -28,10 +28,12 @@ const (
 )
 
 type Run struct {
-	ID       int64
-	Workflow string
-	Status   RunStatus
-	Steps    []StepRun
+	ID        int64
+	Workflow  string
+	Status    RunStatus
+	CreatedAt string
+	UpdatedAt string
+	Steps     []StepRun
 }
 
 type StepRun struct {
@@ -62,6 +64,7 @@ func Open(path string) (*Store, error) {
 	for _, pragma := range []string{
 		`PRAGMA journal_mode=WAL;`,
 		`PRAGMA busy_timeout=5000;`,
+		`PRAGMA foreign_keys=ON;`,
 	} {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
@@ -86,7 +89,7 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE TABLE IF NOT EXISTS steps (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	run_id INTEGER NOT NULL REFERENCES runs(id),
+	run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
 	idx INTEGER NOT NULL,
 	name TEXT NOT NULL,
 	status TEXT NOT NULL
@@ -204,10 +207,38 @@ func (s *Store) SetStepProgress(runID int64, stepIndex int, status StepStatus, a
 	return requireRow("step", stepIndex, res)
 }
 
+func (s *Store) ListRuns(status string, limit, offset int) ([]Run, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	q := `SELECT id, workflow, status, created_at, updated_at FROM runs`
+	args := []any{}
+	if status != "" {
+		q += ` WHERE status = ?`
+		args = append(args, status)
+	}
+	q += ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		var r Run
+		if err := rows.Scan(&r.ID, &r.Workflow, &r.Status, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetRun(runID int64) (Run, error) {
 	run := Run{ID: runID}
-	err := s.db.QueryRow(`SELECT workflow, status FROM runs WHERE id = ?`, runID).
-		Scan(&run.Workflow, &run.Status)
+	err := s.db.QueryRow(`SELECT workflow, status, created_at, updated_at FROM runs WHERE id = ?`, runID).
+		Scan(&run.Workflow, &run.Status, &run.CreatedAt, &run.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return run, fmt.Errorf("run %d not found", runID)
 	}

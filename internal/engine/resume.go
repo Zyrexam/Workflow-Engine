@@ -42,6 +42,16 @@ func (w *Worker) Resume(ctx context.Context, runID int64) (int64, error) {
 		return runID, fmt.Errorf("workflow %q of run %d is no longer registered (registered: %v)",
 			run.Workflow, runID, w.Reg.List())
 	}
+	runTimeout := w.RunTimeout
+	if wf.Timeout > 0 && (runTimeout == 0 || wf.Timeout < runTimeout) {
+		runTimeout = wf.Timeout
+	}
+	if runTimeout > 0 && runTimeout != w.RunTimeout {
+		// apply additional workflow-level deadline on top of any worker deadline
+		c, cancel := context.WithTimeout(ctx, runTimeout)
+		defer cancel()
+		ctx = c
+	}
 	if len(wf.Steps) != len(run.Steps) {
 		return runID, fmt.Errorf("workflow %q changed shape: %d steps registered, %d recorded for run %d",
 			run.Workflow, len(wf.Steps), len(run.Steps), runID)

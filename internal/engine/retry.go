@@ -52,11 +52,14 @@ func DefaultBackoff(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
+	if attempt > 6 {
+		attempt = 6
+	}
 	base := time.Second << uint(attempt-1)
 	if base <= 0 || base > maxBackoff {
 		base = maxBackoff
 	}
-	return time.Duration(rand.Int64N(int64(base) + 1))
+	return time.Duration(rand.Int64N(int64(base)) + 1)
 }
 
 // SleepWithContext returns ctx.Err() if the context is done before or during

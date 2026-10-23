@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Zyrexam/Workflow-Engine/internal/engine"
 	"github.com/Zyrexam/Workflow-Engine/internal/store"
@@ -19,6 +21,9 @@ func main() {
 	fs.SetOutput(os.Stderr)
 	dbPath := fs.String("db", "db/state.db", "path to the SQLite state database")
 	configPath := fs.String("config", "", "path to a JSON workflow config file")
+	statusFilter := fs.String("status", "", "filter list by run status")
+	limit := fs.Int("limit", 50, "max runs for list")
+	offset := fs.Int("offset", 0, "offset for list")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -28,25 +33,39 @@ func main() {
 		usage()
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+
 	cmd, rest := args[0], args[1:]
 	var err error
 	switch cmd {
 	case "run":
 		err = requireArgs(rest, 1, func(arg string) error {
-			return run(context.Background(), *dbPath, *configPath, arg)
+			return run(ctx, *dbPath, *configPath, arg)
 		})
 	case "status":
 		err = requireArgs(rest, 1, func(arg string) error {
 			return status(*dbPath, arg)
 		})
+	case "list":
+		err = list(*dbPath, *statusFilter, *limit, *offset)
 	case "resume":
 		err = requireArgs(rest, 1, func(arg string) error {
-			return resume(context.Background(), *dbPath, *configPath, arg)
+			return resume(ctx, *dbPath, *configPath, arg)
 		})
 	default:
 		usage()
 	}
 	if err != nil {
+		if errors.Is(err, errUsage) {
+			usage()
+		}
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
@@ -56,14 +75,17 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   workflow [-db path] [-config file] run <workflow-name>
   workflow [-db path] [-config file] resume <run-id>
-  workflow [-db path] status <run-id>`)
+  workflow [-db path] status <run-id>
+  workflow [-db path] list [-status S] [-limit N] [-offset N]`)
 	fmt.Fprintln(os.Stderr, "(flags must precede the subcommand)")
 	os.Exit(2)
 }
 
+var errUsage = errors.New("usage error")
+
 func requireArgs(args []string, n int, fn func(arg string) error) error {
 	if len(args) != n {
-		usage()
+		return errUsage
 	}
 	for _, arg := range args {
 		if err := fn(arg); err != nil {
@@ -154,6 +176,22 @@ func resume(ctx context.Context, dbPath, configPath, runIDArg string) error {
 		return err
 	}
 	printRun(r)
+	return nil
+}
+
+func list(dbPath, statusFilter string, limit, offset int) error {
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	runs, err := st.ListRuns(statusFilter, limit, offset)
+	if err != nil {
+		return err
+	}
+	for _, r := range runs {
+		fmt.Printf("Run %d (%s): %s  [%s]\n", r.ID, r.Workflow, r.Status, r.CreatedAt)
+	}
 	return nil
 }
 

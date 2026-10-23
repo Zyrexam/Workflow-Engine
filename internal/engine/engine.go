@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Zyrexam/Workflow-Engine/internal/store"
@@ -14,16 +15,19 @@ import (
 type StepFunc func(ctx context.Context) error
 
 type Step struct {
-	Name string
-	Fn   StepFunc
+	Name    string
+	Fn      StepFunc
+	Timeout time.Duration // 0 = no per-step deadline
 }
 
 type Workflow struct {
-	Name  string
-	Steps []Step
+	Name    string
+	Steps   []Step
+	Timeout time.Duration // 0 = no per-workflow deadline (falls back to Worker.RunTimeout)
 }
 
 type Registry struct {
+	mu        sync.RWMutex
 	workflows map[string]Workflow
 }
 
@@ -32,6 +36,8 @@ func NewRegistry() *Registry {
 }
 
 func (r *Registry) Register(w Workflow) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if w.Name == "" {
 		return fmt.Errorf("workflow name is required")
 	}
@@ -51,11 +57,15 @@ func (r *Registry) Register(w Workflow) error {
 }
 
 func (r *Registry) Get(name string) (Workflow, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	w, ok := r.workflows[name]
 	return w, ok
 }
 
 func (r *Registry) List() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.workflows))
 	for name := range r.workflows {
 		names = append(names, name)
@@ -103,16 +113,21 @@ func (w *Worker) Execute(ctx context.Context, name string) (int64, error) {
 	if err := w.validate(); err != nil {
 		return 0, err
 	}
-	if w.RunTimeout > 0 {
-		c, cancel := context.WithTimeout(ctx, w.RunTimeout)
-		defer cancel()
-		ctx = c
-	}
 	log := w.log()
 
 	wf, ok := w.Reg.Get(name)
 	if !ok {
 		return 0, fmt.Errorf("unknown workflow %q (registered: %v)", name, w.Reg.List())
+	}
+
+	runTimeout := w.RunTimeout
+	if wf.Timeout > 0 && (runTimeout == 0 || wf.Timeout < runTimeout) {
+		runTimeout = wf.Timeout
+	}
+	if runTimeout > 0 {
+		c, cancel := context.WithTimeout(ctx, runTimeout)
+		defer cancel()
+		ctx = c
 	}
 
 	stepNames := make([]string, len(wf.Steps))
@@ -154,7 +169,13 @@ func (w *Worker) runSteps(ctx context.Context, log *slog.Logger, runID int64, st
 			if err := w.Store.SetStepProgress(runID, runIndex, store.StepStatusRunning, attempts, ""); err != nil {
 				return err
 			}
-			stepErr := st.Fn(ctx)
+			stepCtx := ctx
+			if st.Timeout > 0 {
+				c, cancel := context.WithTimeout(ctx, st.Timeout)
+				defer cancel()
+				stepCtx = c
+			}
+			stepErr := st.Fn(stepCtx)
 			if stepErr == nil {
 				if err := w.Store.SetStepProgress(runID, runIndex, store.StepStatusCompleted, attempts, ""); err != nil {
 					return err
