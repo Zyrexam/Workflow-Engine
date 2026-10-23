@@ -19,6 +19,11 @@ func (w *Worker) Resume(ctx context.Context, runID int64) (int64, error) {
 	if err := w.validate(); err != nil {
 		return 0, err
 	}
+	if w.RunTimeout > 0 {
+		c, cancel := context.WithTimeout(ctx, w.RunTimeout)
+		defer cancel()
+		ctx = c
+	}
 	log := w.log()
 
 	run, err := w.Store.GetRun(runID)

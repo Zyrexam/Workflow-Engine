@@ -66,6 +66,28 @@ func TestStatusTransitionsPersist(t *testing.T) {
 	}
 }
 
+func TestSetStepStatusPreservesProgress(t *testing.T) {
+	s := openTestStore(t)
+
+	runID, err := s.CreateRun("deploy", []string{"fetch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetStepProgress(runID, 0, StepStatusRunning, 2, "boom once"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetStepStatus(runID, 0, StepStatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Steps[0].Attempts != 2 || run.Steps[0].LastError != "boom once" {
+		t.Fatalf("status-only update must not reset progress: %+v", run.Steps[0])
+	}
+}
+
 func TestRunNotFound(t *testing.T) {
 	s := openTestStore(t)
 	if _, err := s.GetRun(42); err == nil {

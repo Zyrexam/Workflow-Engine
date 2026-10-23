@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Zyrexam/Workflow-Engine/internal/store"
 )
@@ -194,6 +196,57 @@ func TestResumeFreshTransitions(t *testing.T) {
 	}
 	if run.Steps[0].LastError != "" {
 		t.Fatalf("recovered step still has last error: %q", run.Steps[0].LastError)
+	}
+}
+
+func TestResumeBackoffCancelMarksCorrectStep(t *testing.T) {
+	s := openEngineStore(t)
+	reg := NewRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	if err := reg.Register(Workflow{
+		Name: "demo",
+		Steps: []Step{
+			{Name: "done", Fn: func(ctx context.Context) error { return nil }},
+			{Name: "target", Fn: func(ctx context.Context) error { return fmt.Errorf("boom") }},
+			{Name: "later", Fn: func(ctx context.Context) error { t.Fatal("never reached"); return nil }},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := s.CreateRun("demo", []string{"done", "target", "later"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetStepProgress(runID, 0, store.StepStatusCompleted, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	pol := &RetryPolicy{
+		MaxAttempts: 2,
+		Backoff: func(attempt int) time.Duration { return 10 * time.Second },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			cancel()
+			return SleepWithContext(ctx, d)
+		},
+		IsRetryable: IsRetryable,
+	}
+	// Regression: the sleep-cancel path once marked the slice index instead of
+	// the absolute run index, failing "done" instead of "target".
+	_, err = (&Worker{Store: s, Reg: reg, Retry: pol}).Resume(ctx, runID)
+	if err == nil {
+		t.Fatal("expected cancellation error")
+	}
+	run, err := s.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Steps[0].Status != store.StepStatusCompleted {
+		t.Fatalf("wrong step marked failed: %+v", run.Steps[0])
+	}
+	if run.Steps[1].Status != store.StepStatusFailed || run.Steps[1].LastError == "" {
+		t.Fatalf("target step not marked failed with error: %+v", run.Steps[1])
 	}
 }
 

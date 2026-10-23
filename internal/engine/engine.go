@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/Zyrexam/Workflow-Engine/internal/store"
 )
@@ -64,10 +65,11 @@ func (r *Registry) List() []string {
 }
 
 type Worker struct {
-	Store *store.Store
-	Reg   *Registry
-	Log   *slog.Logger
-	Retry *RetryPolicy
+	Store      *store.Store
+	Reg        *Registry
+	Log        *slog.Logger
+	Retry      *RetryPolicy
+	RunTimeout time.Duration // 0 = no overall run deadline
 }
 
 func (w *Worker) validate() error {
@@ -100,6 +102,11 @@ func (w *Worker) log() *slog.Logger {
 func (w *Worker) Execute(ctx context.Context, name string) (int64, error) {
 	if err := w.validate(); err != nil {
 		return 0, err
+	}
+	if w.RunTimeout > 0 {
+		c, cancel := context.WithTimeout(ctx, w.RunTimeout)
+		defer cancel()
+		ctx = c
 	}
 	log := w.log()
 
@@ -161,7 +168,7 @@ func (w *Worker) runSteps(ctx context.Context, log *slog.Logger, runID int64, st
 				return w.failRun(log, runID, runIndex, st.Name, attempts, stepErr)
 			}
 			if sleepErr := pol.Sleep(ctx, pol.Backoff(attempts)); sleepErr != nil {
-				return w.failRun(log, runID, i, st.Name, attempts,
+				return w.failRun(log, runID, runIndex, st.Name, attempts,
 					fmt.Errorf("backoff canceled: %w", sleepErr))
 			}
 		}

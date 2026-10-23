@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Zyrexam/Workflow-Engine/internal/store"
 )
@@ -99,5 +100,35 @@ func TestExecuteUnknownWorkflow(t *testing.T) {
 	_, err := (&Worker{Store: s, Reg: NewRegistry()}).Execute(context.Background(), "nope")
 	if err == nil {
 		t.Fatal("expected unknown-workflow error")
+	}
+}
+
+func TestExecuteRunTimeout(t *testing.T) {
+	s := openStore(t)
+	reg := NewRegistry()
+	if err := reg.Register(Workflow{
+		Name: "slow",
+		Steps: []Step{{Name: "stall", Fn: func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+				return nil
+			}
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{Store: s, Reg: reg, RunTimeout: 50 * time.Millisecond}
+	runID, err := w.Execute(context.Background(), "slow")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	run, err := s.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != store.RunStatusFailed {
+		t.Fatalf("expected failed run, got %s", run.Status)
 	}
 }

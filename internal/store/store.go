@@ -175,7 +175,11 @@ func (s *Store) SetRunStatus(runID int64, status RunStatus) error {
 }
 
 func (s *Store) SetStepStatus(runID int64, stepIndex int, status StepStatus) error {
-	return s.SetStepProgress(runID, stepIndex, status, 0, "")
+	res, err := s.db.Exec(`UPDATE steps SET status = ? WHERE run_id = ? AND idx = ?`, status, runID, stepIndex)
+	if err != nil {
+		return fmt.Errorf("set step status: %w", err)
+	}
+	return requireRow("step", stepIndex, res)
 }
 
 func (s *Store) SetStepProgress(runID int64, stepIndex int, status StepStatus, attempts int, lastError string) error {
