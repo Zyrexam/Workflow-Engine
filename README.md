@@ -1,6 +1,8 @@
-# Distributed Workflow Engine
+# Workflow Engine
 
 A durable, resumable job orchestration engine written in Go. Define multi-step workflows as ordered Go functions, persist run/step state in SQLite, execute with retries and exponential backoff, and resume incomplete runs after a crash — all from a small CLI.
+
+> Scope note: this is a **single-process** engine. "Distributed" is not a claim — there are no remote workers, queues, or leader election. Runs execute in one process against one SQLite file.
 
 > Stack: Go, SQLite (pure-Go `modernc.org/sqlite`, no CGO), `log/slog`.
 

@@ -48,8 +48,20 @@ func (w *Worker) Resume(ctx context.Context, runID int64) (int64, error) {
 	}
 
 	log.Info("resume started", "run", runID, "workflow", run.Workflow, "run_status", run.Status)
-	if err := w.Store.SetRunStatus(runID, store.RunStatusRunning); err != nil {
+	claimed, err := w.Store.ClaimRunForResume(runID)
+	if err != nil {
 		return runID, err
+	}
+	if !claimed {
+		// Lost the race (or state changed); re-evaluate from the store.
+		fresh, err := w.Store.GetRun(runID)
+		if err != nil {
+			return runID, err
+		}
+		if fresh.Status == store.RunStatusCompleted {
+			return runID, ErrRunCompleted
+		}
+		return runID, fmt.Errorf("run %d not resumable (status %q)", runID, fresh.Status)
 	}
 
 	start := len(run.Steps)

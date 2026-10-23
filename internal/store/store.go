@@ -166,6 +166,19 @@ func (s *Store) CreateRun(workflow string, stepNames []string) (int64, error) {
 	return runID, tx.Commit()
 }
 
+func (s *Store) ClaimRunForResume(runID int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE runs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN (?, ?, ?)`,
+		RunStatusRunning, runID, RunStatusPending, RunStatusRunning, RunStatusFailed)
+	if err != nil {
+		return false, fmt.Errorf("claim run: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *Store) SetRunStatus(runID int64, status RunStatus) error {
 	res, err := s.db.Exec(`UPDATE runs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, status, runID)
 	if err != nil {

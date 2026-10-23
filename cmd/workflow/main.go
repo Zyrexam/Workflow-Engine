@@ -18,6 +18,7 @@ func main() {
 	fs := flag.NewFlagSet("workflow", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	dbPath := fs.String("db", "db/state.db", "path to the SQLite state database")
+	configPath := fs.String("config", "", "path to a JSON workflow config file")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -32,7 +33,7 @@ func main() {
 	switch cmd {
 	case "run":
 		err = requireArgs(rest, 1, func(arg string) error {
-			return run(context.Background(), *dbPath, arg)
+			return run(context.Background(), *dbPath, *configPath, arg)
 		})
 	case "status":
 		err = requireArgs(rest, 1, func(arg string) error {
@@ -40,7 +41,7 @@ func main() {
 		})
 	case "resume":
 		err = requireArgs(rest, 1, func(arg string) error {
-			return resume(context.Background(), *dbPath, arg)
+			return resume(context.Background(), *dbPath, *configPath, arg)
 		})
 	default:
 		usage()
@@ -53,9 +54,9 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
-  workflow [-db path] run <workflow-name>
-  workflow [-db path] status <run-id>
-  workflow [-db path] resume <run-id>`)
+  workflow [-db path] [-config file] run <workflow-name>
+  workflow [-db path] [-config file] resume <run-id>
+  workflow [-db path] status <run-id>`)
 	fmt.Fprintln(os.Stderr, "(flags must precede the subcommand)")
 	os.Exit(2)
 }
@@ -72,10 +73,21 @@ func requireArgs(args []string, n int, fn func(arg string) error) error {
 	return nil
 }
 
-func run(ctx context.Context, dbPath, workflowName string) error {
+func run(ctx context.Context, dbPath, configPath, workflowName string) error {
 	reg := engine.NewRegistry()
 	if err := registerWorkflows(reg); err != nil {
 		return err
+	}
+	if configPath != "" {
+		wfs, err := engine.LoadWorkflows(configPath, defaultHandlers())
+		if err != nil {
+			return err
+		}
+		for _, wf := range wfs {
+			if err := reg.Register(wf); err != nil {
+				return err
+			}
+		}
 	}
 
 	st, err := store.Open(dbPath)
@@ -97,7 +109,7 @@ func run(ctx context.Context, dbPath, workflowName string) error {
 	return nil
 }
 
-func resume(ctx context.Context, dbPath, runIDArg string) error {
+func resume(ctx context.Context, dbPath, configPath, runIDArg string) error {
 	runID, err := engine.ParseRunID(runIDArg)
 	if err != nil {
 		return err
@@ -105,6 +117,17 @@ func resume(ctx context.Context, dbPath, runIDArg string) error {
 	reg := engine.NewRegistry()
 	if err := registerWorkflows(reg); err != nil {
 		return err
+	}
+	if configPath != "" {
+		wfs, err := engine.LoadWorkflows(configPath, defaultHandlers())
+		if err != nil {
+			return err
+		}
+		for _, wf := range wfs {
+			if err := reg.Register(wf); err != nil {
+				return err
+			}
+		}
 	}
 	st, err := store.Open(dbPath)
 	if err != nil {

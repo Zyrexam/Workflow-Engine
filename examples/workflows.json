@@ -1,0 +1,8 @@
+{
+  "workflows": [
+    {
+      "name": "deploy",
+      "steps": ["fetch", "transform"]
+    }
+  ]
+}
