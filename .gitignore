@@ -1,9 +1,10 @@
 db/
 db/*.db
 db/*.db-journal
+SPEC.md
 go-guide.md
 decisions.md
 docs/
 .scratch/
 AGENTS.md
-critiques.mdcritiques.md
+critiques.md
