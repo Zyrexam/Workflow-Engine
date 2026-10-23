@@ -35,11 +35,13 @@ type Run struct {
 }
 
 type StepRun struct {
-	ID     int64
-	RunID  int64
-	Index  int
-	Name   string
-	Status StepStatus
+	ID        int64
+	RunID     int64
+	Index     int
+	Name      string
+	Status    StepStatus
+	Attempts  int
+	LastError string
 }
 
 type Store struct {
@@ -56,6 +58,24 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{
+		`PRAGMA journal_mode=WAL;`,
+		`PRAGMA busy_timeout=5000;`,
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("apply %s: %w", pragma, err)
+		}
+	}
+	if err := initSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS runs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,10 +92,52 @@ CREATE TABLE IF NOT EXISTS steps (
 	status TEXT NOT NULL
 );
 `); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("init schema: %w", err)
+		return fmt.Errorf("init schema: %w", err)
 	}
-	return &Store{db: db}, nil
+	cols, err := tableColumns(db, "steps")
+	if err != nil {
+		return err
+	}
+	migrations := []struct {
+		column  string
+		addDDL  string
+		missing bool
+	}{
+		{column: "attempts", addDDL: `ALTER TABLE steps ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`},
+		{column: "last_error", addDDL: `ALTER TABLE steps ADD COLUMN last_error TEXT`},
+	}
+	for _, m := range migrations {
+		if cols[m.column] {
+			continue
+		}
+		if _, err := db.Exec(m.addDDL); err != nil {
+			return fmt.Errorf("migrate steps: add %s: %w", m.column, err)
+		}
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_steps_run_order ON steps(run_id, idx)`); err != nil {
+		return fmt.Errorf("init unique index: %w", err)
+	}
+	return nil
+}
+
+func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return nil, fmt.Errorf("table_info %s: %w", table, err)
+	}
+	defer rows.Close()
+	cols := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return nil, fmt.Errorf("scan table_info: %w", err)
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -113,7 +175,12 @@ func (s *Store) SetRunStatus(runID int64, status RunStatus) error {
 }
 
 func (s *Store) SetStepStatus(runID int64, stepIndex int, status StepStatus) error {
-	res, err := s.db.Exec(`UPDATE steps SET status = ? WHERE run_id = ? AND idx = ?`, status, runID, stepIndex)
+	return s.SetStepProgress(runID, stepIndex, status, 0, "")
+}
+
+func (s *Store) SetStepProgress(runID int64, stepIndex int, status StepStatus, attempts int, lastError string) error {
+	res, err := s.db.Exec(`UPDATE steps SET status = ?, attempts = ?, last_error = ? WHERE run_id = ? AND idx = ?`,
+		status, attempts, lastError, runID, stepIndex)
 	if err != nil {
 		return fmt.Errorf("set step status: %w", err)
 	}
@@ -130,7 +197,7 @@ func (s *Store) GetRun(runID int64) (Run, error) {
 	if err != nil {
 		return run, fmt.Errorf("query run: %w", err)
 	}
-	rows, err := s.db.Query(`SELECT id, idx, name, status FROM steps WHERE run_id = ? ORDER BY idx`, runID)
+	rows, err := s.db.Query(`SELECT id, idx, name, status, attempts, last_error FROM steps WHERE run_id = ? ORDER BY idx`, runID)
 	if err != nil {
 		return run, fmt.Errorf("query steps: %w", err)
 	}
@@ -138,10 +205,12 @@ func (s *Store) GetRun(runID int64) (Run, error) {
 	for rows.Next() {
 		st := StepRun{RunID: runID}
 		var status StepStatus
-		if err := rows.Scan(&st.ID, &st.Index, &st.Name, &status); err != nil {
+		var lastError sql.NullString
+		if err := rows.Scan(&st.ID, &st.Index, &st.Name, &status, &st.Attempts, &lastError); err != nil {
 			return run, fmt.Errorf("scan step: %w", err)
 		}
 		st.Status = status
+		st.LastError = lastError.String
 		run.Steps = append(run.Steps, st)
 	}
 	return run, rows.Err()

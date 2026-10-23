@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Zyrexam/workflowengine/internal/store"
+	"github.com/Zyrexam/Workflow-Engine/internal/store"
 )
 
 func openStore(t *testing.T) *store.Store {

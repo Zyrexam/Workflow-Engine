@@ -1,4 +1,4 @@
-module github.com/Zyrexam/workflowengine
+module github.com/Zyrexam/Workflow-Engine
 
 go 1.26.4
 

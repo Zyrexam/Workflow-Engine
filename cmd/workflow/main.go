@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 
-	"github.com/Zyrexam/workflowengine/internal/engine"
-	"github.com/Zyrexam/workflowengine/internal/store"
+	"github.com/Zyrexam/Workflow-Engine/internal/engine"
+	"github.com/Zyrexam/Workflow-Engine/internal/store"
 )
 
 func main() {
@@ -37,6 +38,10 @@ func main() {
 		err = requireArgs(rest, 1, func(arg string) error {
 			return status(*dbPath, arg)
 		})
+	case "resume":
+		err = requireArgs(rest, 1, func(arg string) error {
+			return resume(context.Background(), *dbPath, arg)
+		})
 	default:
 		usage()
 	}
@@ -49,7 +54,9 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   workflow [-db path] run <workflow-name>
-  workflow [-db path] status <run-id>`)
+  workflow [-db path] status <run-id>
+  workflow [-db path] resume <run-id>`)
+	fmt.Fprintln(os.Stderr, "(flags must precede the subcommand)")
 	os.Exit(2)
 }
 
@@ -90,6 +97,43 @@ func run(ctx context.Context, dbPath, workflowName string) error {
 	return nil
 }
 
+func resume(ctx context.Context, dbPath, runIDArg string) error {
+	runID, err := engine.ParseRunID(runIDArg)
+	if err != nil {
+		return err
+	}
+	reg := engine.NewRegistry()
+	if err := registerWorkflows(reg); err != nil {
+		return err
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	w := &engine.Worker{Store: st, Reg: reg}
+	runID, err = w.Resume(ctx, runID)
+	if errors.Is(err, engine.ErrRunCompleted) {
+		fmt.Printf("Run %d already completed; nothing to resume\n", runID)
+		r, err := st.GetRun(runID)
+		if err != nil {
+			return err
+		}
+		printRun(r)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	r, err := st.GetRun(runID)
+	if err != nil {
+		return err
+	}
+	printRun(r)
+	return nil
+}
+
 func status(dbPath, runIDArg string) error {
 	runID, err := engine.ParseRunID(runIDArg)
 	if err != nil {
@@ -112,6 +156,13 @@ func status(dbPath, runIDArg string) error {
 func printRun(r store.Run) {
 	fmt.Printf("Run %d (%s): %s\n", r.ID, r.Workflow, r.Status)
 	for _, st := range r.Steps {
-		fmt.Printf("  [%2d] %-12s %s\n", st.Index, st.Name, st.Status)
+		line := fmt.Sprintf("  [%2d] %-12s %s", st.Index, st.Name, st.Status)
+		if st.Attempts > 0 {
+			line += fmt.Sprintf(" (attempts=%d)", st.Attempts)
+		}
+		fmt.Println(line)
+		if st.LastError != "" {
+			fmt.Printf("       last error: %s\n", st.LastError)
+		}
 	}
 }

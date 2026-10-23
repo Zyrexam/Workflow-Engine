@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 
-	"github.com/Zyrexam/workflowengine/internal/store"
+	"github.com/Zyrexam/Workflow-Engine/internal/store"
 )
 
 type StepFunc func(ctx context.Context) error
@@ -57,6 +59,7 @@ func (r *Registry) List() []string {
 	for name := range r.workflows {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
@@ -64,13 +67,41 @@ type Worker struct {
 	Store *store.Store
 	Reg   *Registry
 	Log   *slog.Logger
+	Retry *RetryPolicy
 }
 
-func (w *Worker) Execute(ctx context.Context, name string) (int64, error) {
-	log := w.Log
-	if log == nil {
-		log = slog.Default()
+func (w *Worker) validate() error {
+	if w.Store == nil {
+		return errors.New("engine: worker has no store")
 	}
+	if w.Reg == nil {
+		return errors.New("engine: worker has no registry")
+	}
+	return nil
+}
+
+func (w *Worker) policy() *RetryPolicy {
+	p := w.Retry
+	if p == nil {
+		p = &RetryPolicy{}
+	}
+	return p.withDefaults()
+}
+
+func (w *Worker) log() *slog.Logger {
+	if w.Log == nil {
+		return slog.Default()
+	}
+	return w.Log
+}
+
+// Execute starts a fresh run of the named workflow and drives every step
+// through the retry policy.
+func (w *Worker) Execute(ctx context.Context, name string) (int64, error) {
+	if err := w.validate(); err != nil {
+		return 0, err
+	}
+	log := w.log()
 
 	wf, ok := w.Reg.Get(name)
 	if !ok {
@@ -90,29 +121,61 @@ func (w *Worker) Execute(ctx context.Context, name string) (int64, error) {
 	if err := w.Store.SetRunStatus(runID, store.RunStatusRunning); err != nil {
 		return runID, err
 	}
-
-	for i, st := range wf.Steps {
-		if err := w.Store.SetStepStatus(runID, i, store.StepStatusRunning); err != nil {
-			return runID, err
-		}
-		if stepErr := st.Fn(ctx); stepErr != nil {
-			if err := w.Store.SetStepStatus(runID, i, store.StepStatusFailed); err != nil {
-				return runID, err
-			}
-			if err := w.Store.SetRunStatus(runID, store.RunStatusFailed); err != nil {
-				return runID, err
-			}
-			log.Error("step failed", "run", runID, "step", st.Name, "error", stepErr)
-			return runID, fmt.Errorf("step %d %q: %w", i, st.Name, stepErr)
-		}
-		if err := w.Store.SetStepStatus(runID, i, store.StepStatusCompleted); err != nil {
-			return runID, err
-		}
+	if err := w.runSteps(ctx, log, runID, wf.Steps, make([]int, len(wf.Steps)), 0); err != nil {
+		return runID, err
 	}
-
 	if err := w.Store.SetRunStatus(runID, store.RunStatusCompleted); err != nil {
 		return runID, err
 	}
 	log.Info("run completed", "run", runID, "workflow", name)
 	return runID, nil
+}
+
+// runSteps drives steps in order, starting each with attemptsBase[i] prior
+// attempts recorded in the store; indexBase is the run's absolute index of
+// steps[0] (0 for a fresh Execute, first unfinished step for Resume).
+// Persisted progress writes through on every attempt transition. First
+// failure that is not retryable (or that exhausts MaxAttempts) fails the
+// run and aborts.
+func (w *Worker) runSteps(ctx context.Context, log *slog.Logger, runID int64, steps []Step, attemptsBase []int, indexBase int) error {
+	pol := w.policy()
+	for i, st := range steps {
+		runIndex := indexBase + i
+		attempts := attemptsBase[i]
+		for {
+			attempts++
+			if err := w.Store.SetStepProgress(runID, runIndex, store.StepStatusRunning, attempts, ""); err != nil {
+				return err
+			}
+			stepErr := st.Fn(ctx)
+			if stepErr == nil {
+				if err := w.Store.SetStepProgress(runID, runIndex, store.StepStatusCompleted, attempts, ""); err != nil {
+					return err
+				}
+				break
+			}
+			if err := w.Store.SetStepProgress(runID, runIndex, store.StepStatusRunning, attempts, stepErr.Error()); err != nil {
+				return err
+			}
+			if !pol.IsRetryable(stepErr) || attempts >= pol.MaxAttempts {
+				return w.failRun(log, runID, runIndex, st.Name, attempts, stepErr)
+			}
+			if sleepErr := pol.Sleep(ctx, pol.Backoff(attempts)); sleepErr != nil {
+				return w.failRun(log, runID, i, st.Name, attempts,
+					fmt.Errorf("backoff canceled: %w", sleepErr))
+			}
+		}
+	}
+	return nil
+}
+
+func (w *Worker) failRun(log *slog.Logger, runID int64, stepIndex int, stepName string, attempts int, stepErr error) error {
+	if err := w.Store.SetStepProgress(runID, stepIndex, store.StepStatusFailed, attempts, stepErr.Error()); err != nil {
+		return err
+	}
+	if err := w.Store.SetRunStatus(runID, store.RunStatusFailed); err != nil {
+		return err
+	}
+	log.Error("step failed", "run", runID, "step", stepName, "attempts", attempts, "error", stepErr)
+	return fmt.Errorf("step %d %q: %w", stepIndex, stepName, stepErr)
 }
