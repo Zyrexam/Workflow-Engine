@@ -43,9 +43,10 @@ go run ./cmd/workflow -db /tmp/state.db run hello
 ## CLI reference
 
 ```
-workflow [-db path] run <workflow-name>
+workflow [-db path] [-config file] [-timeout dur] run <workflow-name>
+workflow [-db path] [-config file] [-timeout dur] resume <run-id>
 workflow [-db path] status <run-id>
-workflow [-db path] resume <run-id>
+workflow [-db path] list [-status S] [-limit N] [-offset N]
 ```
 
 | Command  | Description                                              |
@@ -235,12 +236,19 @@ CREATE TABLE steps (
 - Step functions must be **idempotent** — retries re-run the entire step.
 - Attempt count and last error persisted per step; `status` reflects progress mid-retry.
 
+## Timeouts
+
+- Overall run deadline via `Worker.RunTimeout` or the CLI `-timeout` flag (e.g. `-timeout 30s`).
+- Per-workflow and per-step deadlines via JSON config (`timeout_seconds` on a workflow or step).
+- A timed-out run is marked `failed` with the context error recorded as the last error.
+
 ## Crash recovery
 
 - Resolve the next step purely from persisted store state (no in-memory assumptions).
 - Skip every step recorded `completed`; re-run `pending`/`running`/`failed` from the pickup point.
 - Resuming a `completed` run is a no-op (`ErrRunCompleted`).
 - A step left `running` after a crash is re-run (only `completed` is skipped).
+- Resuming an interrupted config-defined run requires the same `-config` file; a completed run does not.
 
 ## Testing
 

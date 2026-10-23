@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Zyrexam/Workflow-Engine/internal/engine"
 	"github.com/Zyrexam/Workflow-Engine/internal/store"
@@ -21,9 +22,7 @@ func main() {
 	fs.SetOutput(os.Stderr)
 	dbPath := fs.String("db", "db/state.db", "path to the SQLite state database")
 	configPath := fs.String("config", "", "path to a JSON workflow config file")
-	statusFilter := fs.String("status", "", "filter list by run status")
-	limit := fs.Int("limit", 50, "max runs for list")
-	offset := fs.Int("offset", 0, "offset for list")
+	timeout := fs.Duration("timeout", 0, "overall run deadline (e.g. 30s); 0 = none")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -47,23 +46,34 @@ func main() {
 	switch cmd {
 	case "run":
 		err = requireArgs(rest, 1, func(arg string) error {
-			return run(ctx, *dbPath, *configPath, arg)
+			return run(ctx, *dbPath, *configPath, *timeout, arg)
 		})
 	case "status":
 		err = requireArgs(rest, 1, func(arg string) error {
 			return status(*dbPath, arg)
 		})
 	case "list":
-		err = list(*dbPath, *statusFilter, *limit, *offset)
+		lfs := flag.NewFlagSet("list", flag.ContinueOnError)
+		lfs.SetOutput(os.Stderr)
+		lStatus := lfs.String("status", "", "filter by run status")
+		lLimit := lfs.Int("limit", 50, "max runs")
+		lOffset := lfs.Int("offset", 0, "offset")
+		if perr := lfs.Parse(rest); perr != nil {
+			os.Exit(2)
+		}
+		if lfs.NArg() != 0 {
+			usage()
+		}
+		err = list(*dbPath, *lStatus, *lLimit, *lOffset)
 	case "resume":
 		err = requireArgs(rest, 1, func(arg string) error {
-			return resume(ctx, *dbPath, *configPath, arg)
+			return resume(ctx, *dbPath, *configPath, *timeout, arg)
 		})
 	default:
 		usage()
 	}
 	if err != nil {
-		if errors.Is(err, errUsage) {
+		if errors.Is(err, errUsage) || errors.Is(err, engine.ErrBadRunID) {
 			usage()
 		}
 		slog.Error(err.Error())
@@ -95,7 +105,7 @@ func requireArgs(args []string, n int, fn func(arg string) error) error {
 	return nil
 }
 
-func run(ctx context.Context, dbPath, configPath, workflowName string) error {
+func run(ctx context.Context, dbPath, configPath string, timeout time.Duration, workflowName string) error {
 	reg := engine.NewRegistry()
 	if err := registerWorkflows(reg); err != nil {
 		return err
@@ -118,7 +128,7 @@ func run(ctx context.Context, dbPath, configPath, workflowName string) error {
 	}
 	defer st.Close()
 
-	w := &engine.Worker{Store: st, Reg: reg}
+	w := &engine.Worker{Store: st, Reg: reg, RunTimeout: timeout}
 	runID, err := w.Execute(ctx, workflowName)
 	if err != nil {
 		return err
@@ -131,7 +141,7 @@ func run(ctx context.Context, dbPath, configPath, workflowName string) error {
 	return nil
 }
 
-func resume(ctx context.Context, dbPath, configPath, runIDArg string) error {
+func resume(ctx context.Context, dbPath, configPath string, timeout time.Duration, runIDArg string) error {
 	runID, err := engine.ParseRunID(runIDArg)
 	if err != nil {
 		return err
@@ -157,7 +167,7 @@ func resume(ctx context.Context, dbPath, configPath, runIDArg string) error {
 	}
 	defer st.Close()
 
-	w := &engine.Worker{Store: st, Reg: reg}
+	w := &engine.Worker{Store: st, Reg: reg, RunTimeout: timeout}
 	runID, err = w.Resume(ctx, runID)
 	if errors.Is(err, engine.ErrRunCompleted) {
 		fmt.Printf("Run %d already completed; nothing to resume\n", runID)
@@ -180,6 +190,13 @@ func resume(ctx context.Context, dbPath, configPath, runIDArg string) error {
 }
 
 func list(dbPath, statusFilter string, limit, offset int) error {
+	if statusFilter != "" {
+		switch statusFilter {
+		case "pending", "running", "completed", "failed":
+		default:
+			return fmt.Errorf("unknown status %q (want pending/running/completed/failed)", statusFilter)
+		}
+	}
 	st, err := store.Open(dbPath)
 	if err != nil {
 		return err
@@ -217,7 +234,7 @@ func status(dbPath, runIDArg string) error {
 func printRun(r store.Run) {
 	fmt.Printf("Run %d (%s): %s\n", r.ID, r.Workflow, r.Status)
 	for _, st := range r.Steps {
-		line := fmt.Sprintf("  [%2d] %-12s %s", st.Index, st.Name, st.Status)
+		line := fmt.Sprintf("  [%2d] %-16s %s", st.Index, st.Name, st.Status)
 		if st.Attempts > 0 {
 			line += fmt.Sprintf(" (attempts=%d)", st.Attempts)
 		}

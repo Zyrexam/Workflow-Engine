@@ -46,7 +46,12 @@ func registerWorkflows(reg *engine.Registry) error {
 			{Name: "before", Fn: func(ctx context.Context) error {
 				dir := os.Getenv("CRASH_DIR")
 				if dir == "" {
-					dir = "."
+					d, err := os.MkdirTemp("", "crashy-*")
+					if err != nil {
+						return err
+					}
+					dir = d
+					os.Setenv("CRASH_DIR", dir)
 				}
 				f, _ := os.OpenFile(dir+"/before.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 				if f != nil {

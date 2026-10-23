@@ -138,6 +138,9 @@ func (w *Worker) Execute(ctx context.Context, name string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if ok, err := w.Store.AcquireLease(runID); err != nil || !ok {
+		return runID, fmt.Errorf("could not acquire run lease: %w", err)
+	}
 	log.Info("run started", "run", runID, "workflow", name)
 
 	if err := w.Store.SetRunStatus(runID, store.RunStatusRunning); err != nil {

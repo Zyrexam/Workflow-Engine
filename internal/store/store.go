@@ -85,7 +85,9 @@ CREATE TABLE IF NOT EXISTS runs (
 	workflow TEXT NOT NULL,
 	status TEXT NOT NULL,
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	lease_token TEXT,
+	lease_expires_at DATETIME
 );
 CREATE TABLE IF NOT EXISTS steps (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +110,26 @@ CREATE TABLE IF NOT EXISTS steps (
 	}{
 		{column: "attempts", addDDL: `ALTER TABLE steps ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`},
 		{column: "last_error", addDDL: `ALTER TABLE steps ADD COLUMN last_error TEXT`},
+	}
+	// run-level lease columns (migration for older DBs)
+	runCols, err := tableColumns(db, "runs")
+	if err != nil {
+		return err
+	}
+	runMigrations := []struct {
+		column string
+		addDDL string
+	}{
+		{column: "lease_token", addDDL: `ALTER TABLE runs ADD COLUMN lease_token TEXT`},
+		{column: "lease_expires_at", addDDL: `ALTER TABLE runs ADD COLUMN lease_expires_at DATETIME`},
+	}
+	for _, m := range runMigrations {
+		if runCols[m.column] {
+			continue
+		}
+		if _, err := db.Exec(m.addDDL); err != nil {
+			return fmt.Errorf("migrate runs: add %s: %w", m.column, err)
+		}
 	}
 	for _, m := range migrations {
 		if cols[m.column] {
@@ -169,9 +191,26 @@ func (s *Store) CreateRun(workflow string, stepNames []string) (int64, error) {
 	return runID, tx.Commit()
 }
 
+func (s *Store) AcquireLease(runID int64) (bool, error) {
+	token := fmt.Sprintf("%d", runID) // simple token; expiry is what matters
+	res, err := s.db.Exec(`UPDATE runs SET lease_token = ?, lease_expires_at = datetime('now','+30 seconds'), updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)`,
+		token, runID)
+	if err != nil {
+		return false, fmt.Errorf("acquire lease: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *Store) ClaimRunForResume(runID int64) (bool, error) {
-	res, err := s.db.Exec(`UPDATE runs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN (?, ?, ?)`,
-		RunStatusRunning, runID, RunStatusPending, RunStatusRunning, RunStatusFailed)
+	token := fmt.Sprintf("resume-%d", runID)
+	res, err := s.db.Exec(`UPDATE runs SET status = ?, lease_token = ?, lease_expires_at = datetime('now','+30 seconds'), updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status IN (?, ?, ?) AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)`,
+		RunStatusRunning, token, runID, RunStatusPending, RunStatusRunning, RunStatusFailed)
 	if err != nil {
 		return false, fmt.Errorf("claim run: %w", err)
 	}
@@ -183,7 +222,13 @@ func (s *Store) ClaimRunForResume(runID int64) (bool, error) {
 }
 
 func (s *Store) SetRunStatus(runID int64, status RunStatus) error {
-	res, err := s.db.Exec(`UPDATE runs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, status, runID)
+	var res sql.Result
+	var err error
+	if status == RunStatusCompleted || status == RunStatusFailed {
+		res, err = s.db.Exec(`UPDATE runs SET status = ?, updated_at = CURRENT_TIMESTAMP, lease_expires_at = CURRENT_TIMESTAMP WHERE id = ?`, status, runID)
+	} else {
+		res, err = s.db.Exec(`UPDATE runs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, status, runID)
+	}
 	if err != nil {
 		return fmt.Errorf("set run status: %w", err)
 	}
@@ -199,12 +244,18 @@ func (s *Store) SetStepStatus(runID int64, stepIndex int, status StepStatus) err
 }
 
 func (s *Store) SetStepProgress(runID int64, stepIndex int, status StepStatus, attempts int, lastError string) error {
-	res, err := s.db.Exec(`UPDATE steps SET status = ?, attempts = ?, last_error = ? WHERE run_id = ? AND idx = ?`,
+	res, err := s.db.Exec(`UPDATE steps SET status = ?, attempts = MAX(attempts, ?), last_error = ? WHERE run_id = ? AND idx = ?`,
 		status, attempts, lastError, runID, stepIndex)
 	if err != nil {
 		return fmt.Errorf("set step status: %w", err)
 	}
-	return requireRow("step", stepIndex, res)
+	if err := requireRow("step", stepIndex, res); err != nil {
+		return err
+	}
+	// heartbeat: extend the run lease only if one is held, so setup writes
+	// (which never acquired a lease) don't masquerade as an active owner.
+	_, _ = s.db.Exec(`UPDATE runs SET lease_expires_at = datetime('now','+30 seconds'), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND lease_token IS NOT NULL`, runID)
+	return nil
 }
 
 func (s *Store) ListRuns(status string, limit, offset int) ([]Run, error) {

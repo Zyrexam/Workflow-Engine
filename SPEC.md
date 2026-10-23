@@ -4,12 +4,11 @@
 Durable, resumable job orchestration: define multi-step workflows, persist state, execute with retries and timeouts, resume after crash.
 
 ## MVP
-- Workflow defined as ordered steps (Go functions) or JSON config (`-config`).
-- SQLite state store: workflow run + step status.
-- Worker executes steps; retry with exponential backoff + jitter.
-- Per-step and per-workflow timeouts; overall run deadline.
-- Resume incomplete runs on restart (atomic claim, skip completed).
-- CLI: `run`, `status`, `list`, `resume`.
+- Workflow defined as ordered steps (Go functions) or JSON config (`-config`), with per-step and per-workflow timeouts.
+- SQLite state store: workflow run + step status, attempts, last error, lease/heartbeat, created/updated timestamps.
+- Worker executes steps; retry with exponential backoff + jitter; atomic run claim; overall run deadline.
+- Resume incomplete runs on restart (skip completed, re-run pending/running/failed).
+- CLI: `run`, `status`, `list`, `resume` (with `-timeout`, `-config`, `-status`, `-limit`, `-offset`).
 
 ## Non-goals (v1)
 - Distributed workers, exactly-once, UI, cron triggers, multi-tenant.
